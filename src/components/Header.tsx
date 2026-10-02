@@ -8,6 +8,7 @@ import {
   RefreshCw,
   UserCheck,
   Cpu,
+  Github,
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -18,6 +19,7 @@ interface HeaderProps {
   onOpenAiCopilot: () => void;
   onTriggerCron: () => void;
   isCronRunning: boolean;
+  onOpenDeploymentGuide?: () => void;
 }
 
 const ROLES: { role: UserRole; label: string; desc: string }[] = [
@@ -40,6 +42,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAiCopilot,
   onTriggerCron,
   isCronRunning,
+  onOpenDeploymentGuide,
 }) => {
   return (
     <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
@@ -120,6 +123,19 @@ export const Header: React.FC<HeaderProps> = ({
               <Sparkles className="w-3.5 h-3.5 text-indigo-200" />
               <span className="hidden sm:inline">Copilote IA</span>
             </button>
+
+            {/* GitHub Pages Guide Button */}
+            {onOpenDeploymentGuide && (
+              <button
+                id="btn-header-github"
+                onClick={onOpenDeploymentGuide}
+                title="Guide & Statut de déploiement GitHub Pages"
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 text-xs font-medium transition-colors"
+              >
+                <Github className="w-3.5 h-3.5 text-slate-800" />
+                <span className="hidden md:inline">GitHub Pages</span>
+              </button>
+            )}
 
             {/* Alerts Notification Pill */}
             <button

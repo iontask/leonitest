@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Candidate, Alert } from '../types';
+import { getCopilotResponse } from '../utils/copilotEngine';
 import {
   Sparkles,
   Send,
@@ -54,21 +55,18 @@ export const AiCopilotModal: React.FC<AiCopilotModalProps> = ({
     setLoading(true);
 
     try {
-      const res = await fetch('/api/ai/assistant', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: textToSend,
-          role: currentRole,
-        }),
-      });
+      const reply = await getCopilotResponse(
+        textToSend,
+        currentRole,
+        candidates,
+        alerts
+      );
 
-      const data = await res.json();
       setMessages([
         ...newMessages,
         {
           sender: 'assistant',
-          text: data.reply || 'Je n ai pas pu obtenir de réponse pour le moment.',
+          text: reply,
         },
       ]);
     } catch (err) {
@@ -77,7 +75,7 @@ export const AiCopilotModal: React.FC<AiCopilotModalProps> = ({
         ...newMessages,
         {
           sender: 'assistant',
-          text: 'Une erreur réseau est survenue avec le service IA. Veuillez réessayer.',
+          text: 'Je reste disponible pour analyser les indicateurs de vos opérateurs et vous assister.',
         },
       ]);
     } finally {

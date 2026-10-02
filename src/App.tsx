@@ -14,8 +14,15 @@ import {
   ProductionAssignment,
   LearningCurvePoint,
   Survey,
+  SurveyMilestone,
 } from './types';
-import { initialCandidates, initialTrainingSessions, initialPolyvalenceMatrix } from './data/seedData';
+import {
+  initialCandidates,
+  initialTrainingSessions,
+  initialPolyvalenceMatrix,
+  initialAlerts,
+} from './data/seedData';
+import { calculateAttritionScore, detectCandidateAlerts } from './utils/attritionEngine';
 import { Header } from './components/Header';
 import { Navigation, ActiveTab } from './components/Navigation';
 import { DashboardView } from './components/DashboardView';
@@ -31,34 +38,98 @@ import { AlertsView } from './components/AlertsView';
 import { SurveysView } from './components/SurveysView';
 import { ReportsView } from './components/ReportsView';
 import { AiCopilotModal } from './components/AiCopilotModal';
-import { CheckCircle2, AlertCircle, Info, Sparkles } from 'lucide-react';
+import { DeploymentGuideModal } from './components/DeploymentGuideModal';
+import { CheckCircle2 } from 'lucide-react';
 
-export default function App() {
-  const [candidates, setCandidates] = useState<Candidate[]>(initialCandidates);
-  const [trainingSessions] = useState<TrainingSession[]>(initialTrainingSessions);
-  const [polyvalenceMatrix, setPolyvalenceMatrix] = useState<PolyvalenceSkill[]>(initialPolyvalenceMatrix);
-  const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [stats, setStats] = useState<DashboardStats>({
-    totalCandidates: 8,
-    activeInTraining: 3,
-    activeInProduction: 4,
-    validated90Days: 1,
-    abandonedCount: 0,
-    retentionRate90Days: 100,
-    avgAttritionRisk: 34,
-    readinessScoreJ1: 94.8,
+function computeDashboardStats(cands: Candidate[], alrts: Alert[]): DashboardStats {
+  const total = cands.length;
+  const inTraining = cands.filter((c) => c.status === 'IN_TRAINING').length;
+  const inProd = cands.filter((c) => c.status === 'IN_PRODUCTION').length;
+  const departed = cands.filter((c) => c.status === 'DEPARTED').length;
+  const retention = total > 0 ? Math.round(((total - departed) / total) * 100) : 100;
+  const earlyTurnover =
+    total > 0
+      ? Math.round(
+          (cands.filter((c) => c.status === 'DEPARTED' && c.dayInJourney <= 35).length / total) * 100
+        )
+      : 0;
+
+  const validScores = cands.map((c) => c.attritionScores?.[0]?.score || 0);
+  const avgRisk = validScores.length
+    ? Math.round(validScores.reduce((a, b) => a + b, 0) / validScores.length)
+    : 0;
+
+  const critical = cands.filter((c) => (c.attritionScores?.[0]?.score || 0) >= 71).length;
+  const medium = cands.filter((c) => {
+    const s = c.attritionScores?.[0]?.score || 0;
+    return s >= 41 && s < 71;
+  }).length;
+  const low = cands.filter((c) => (c.attritionScores?.[0]?.score || 0) < 41).length;
+
+  const completeKits = cands.filter(
+    (c) =>
+      c.welcomeKit &&
+      c.welcomeKit.vestGiven &&
+      c.welcomeKit.blouseGiven &&
+      c.welcomeKit.badgeGiven &&
+      c.welcomeKit.contractGiven &&
+      c.welcomeKit.lockerGiven &&
+      c.welcomeKit.ppeGiven
+  ).length;
+  const readiness = total > 0 ? Math.round((completeKits / total) * 1000) / 10 : 94.8;
+
+  return {
+    totalCandidates: total,
+    activeInTraining: inTraining,
+    activeInProduction: inProd,
+    retentionRate90Days: retention,
+    earlyTurnover5Weeks: earlyTurnover,
+    readinessScoreJ1: readiness,
     avgSchoolSuccessRate: 94.2,
     avgQualityFPY: 97.4,
-    criticalAttritionCount: 1,
-    mediumAttritionCount: 2,
-    lowAttritionCount: 5,
-    openAlertsCount: 3,
+    criticalAttritionCount: critical,
+    mediumAttritionCount: medium,
+    lowAttritionCount: low,
+    openAlertsCount: alrts.filter((a) => !a.resolved).length,
+  };
+}
+
+export default function App() {
+  const [candidates, setCandidates] = useState<Candidate[]>(() => {
+    try {
+      const saved = localStorage.getItem('onboarding_candidates');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return initialCandidates;
   });
+
+  const [trainingSessions] = useState<TrainingSession[]>(initialTrainingSessions);
+
+  const [polyvalenceMatrix, setPolyvalenceMatrix] = useState<PolyvalenceSkill[]>(() => {
+    try {
+      const saved = localStorage.getItem('onboarding_polyvalence');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return initialPolyvalenceMatrix;
+  });
+
+  const [alerts, setAlerts] = useState<Alert[]>(() => {
+    try {
+      const saved = localStorage.getItem('onboarding_alerts');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return initialAlerts;
+  });
+
+  const [stats, setStats] = useState<DashboardStats>(() =>
+    computeDashboardStats(candidates, alerts)
+  );
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
   const [currentRole, setCurrentRole] = useState<UserRole>('RH');
   const [isCronRunning, setIsCronRunning] = useState<boolean>(false);
   const [isAiCopilotOpen, setIsAiCopilotOpen] = useState<boolean>(false);
+  const [isDeploymentModalOpen, setIsDeploymentModalOpen] = useState<boolean>(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
@@ -66,30 +137,63 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 4000);
   };
 
-  // Fetch initial data from server API
+  // Sync to local storage
+  useEffect(() => {
+    try {
+      localStorage.setItem('onboarding_candidates', JSON.stringify(candidates));
+    } catch (e) {}
+    setStats(computeDashboardStats(candidates, alerts));
+  }, [candidates]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('onboarding_alerts', JSON.stringify(alerts));
+    } catch (e) {}
+    setStats(computeDashboardStats(candidates, alerts));
+  }, [alerts]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('onboarding_polyvalence', JSON.stringify(polyvalenceMatrix));
+    } catch (e) {}
+  }, [polyvalenceMatrix]);
+
+  // Fetch initial data from server API if backend exists
   const refreshData = async () => {
     try {
       const [candRes, statsRes, alertsRes, polyRes] = await Promise.allSettled([
-        fetch('/api/candidates').then((r) => r.json()),
-        fetch('/api/stats/dashboard').then((r) => r.json()),
-        fetch('/api/alerts').then((r) => r.json()),
-        fetch('/api/polyvalence').then((r) => r.json()),
+        fetch('/api/candidates').then((r) => {
+          if (!r.ok) throw new Error('API non dispo');
+          return r.json();
+        }),
+        fetch('/api/stats/dashboard').then((r) => {
+          if (!r.ok) throw new Error('API non dispo');
+          return r.json();
+        }),
+        fetch('/api/alerts').then((r) => {
+          if (!r.ok) throw new Error('API non dispo');
+          return r.json();
+        }),
+        fetch('/api/polyvalence').then((r) => {
+          if (!r.ok) throw new Error('API non dispo');
+          return r.json();
+        }),
       ]);
 
-      if (candRes.status === 'fulfilled' && Array.isArray(candRes.value)) {
+      if (candRes.status === 'fulfilled' && Array.isArray(candRes.value) && candRes.value.length > 0) {
         setCandidates(candRes.value);
       }
       if (statsRes.status === 'fulfilled' && statsRes.value && !statsRes.value.error) {
         setStats(statsRes.value);
       }
-      if (alertsRes.status === 'fulfilled' && Array.isArray(alertsRes.value)) {
+      if (alertsRes.status === 'fulfilled' && Array.isArray(alertsRes.value) && alertsRes.value.length > 0) {
         setAlerts(alertsRes.value);
       }
-      if (polyRes.status === 'fulfilled' && Array.isArray(polyRes.value)) {
+      if (polyRes.status === 'fulfilled' && Array.isArray(polyRes.value) && polyRes.value.length > 0) {
         setPolyvalenceMatrix(polyRes.value);
       }
     } catch (err) {
-      console.warn('API sync fallback to local state:', err);
+      // Graceful fallback to client-side localStorage state
     }
   };
 
@@ -97,7 +201,19 @@ export default function App() {
     refreshData();
   }, []);
 
-  // --- Handlers ---
+  const handleResetLocalData = () => {
+    try {
+      localStorage.removeItem('onboarding_candidates');
+      localStorage.removeItem('onboarding_alerts');
+      localStorage.removeItem('onboarding_polyvalence');
+      setCandidates(initialCandidates);
+      setAlerts(initialAlerts);
+      setPolyvalenceMatrix(initialPolyvalenceMatrix);
+      showToast('Données réinitialisées aux valeurs initiales d usine.');
+    } catch (e) {}
+  };
+
+  // --- Handlers with Full Offline / GitHub Pages Fallback ---
   const handleAddCandidate = async (data: Partial<Candidate>) => {
     try {
       const res = await fetch('/api/candidates', {
@@ -109,24 +225,71 @@ export default function App() {
         const created = await res.json();
         setCandidates((prev) => [created, ...prev]);
         showToast(`Recrue ${created.firstName} ${created.lastName} enregistrée avec succès.`);
-        refreshData();
+        return;
       }
+      throw new Error('API offline');
     } catch (e) {
-      // Local fallback
+      // Local fallback for GitHub Pages
+      const newId = Date.now();
       const newCand: Candidate = {
-        id: Date.now(),
+        id: newId,
         firstName: data.firstName || 'Nouvelle',
         lastName: data.lastName || 'Recrue',
-        cin: data.cin || 'AB123456',
-        phone: data.phone || '0600000000',
-        address: data.address || 'Tanger',
-        status: 'SELECTED',
+        cin: data.cin || `CIN${newId.toString().slice(-4)}`,
+        phone: data.phone || '+212 6 00 00 00 00',
+        address: data.address || 'Tanger Zone Industrielle',
+        plantSite: data.plantSite || 'Site Manufacturing Alpha - Tanger',
+        educationLevel: data.educationLevel || 'Bac+2 Technicien',
+        testScore: data.testScore || 85,
+        status: data.status || 'SELECTED',
+        trainingSessionId: data.trainingSessionId || 1,
         dayInJourney: 1,
-        plantSite: 'Tanger Automotive Hub',
         createdAt: new Date().toISOString().slice(0, 10),
+        welcomeKit: {
+          id: newId + 100,
+          candidateId: newId,
+          vestGiven: false,
+          blouseGiven: false,
+          contractGiven: false,
+          badgeGiven: false,
+          lockerGiven: false,
+          bookletGiven: false,
+          ppeGiven: false,
+        },
+        transport: {
+          id: newId + 200,
+          candidateId: newId,
+          lineName: 'Ligne 04 - Tanger Centre / Zone Franche',
+          pickupPoint: 'Arrêt Place des Nations',
+          schedule: '06:45',
+          confirmed: true,
+          incidents: [],
+          travelTimeMin: 35,
+        },
+        attritionScores: [
+          {
+            id: newId + 300,
+            candidateId: newId,
+            score: 18,
+            level: 'Faible',
+            computedAt: new Date().toISOString().replace('T', ' ').slice(0, 16),
+            factors: {
+              absencesScore: 0,
+              punctualityScore: 0,
+              satisfactionScore: 0,
+              schoolEvaluationScore: 0,
+              productivityGapScore: 0,
+              defectRateScore: 0,
+              transportRiskScore: 10,
+              welcomeKitDelayScore: 20,
+              postComplexityScore: 0,
+              explanation: ['Nouveau candidat : dossier en cours de constitution'],
+            },
+          },
+        ],
       };
       setCandidates((prev) => [newCand, ...prev]);
-      showToast(`Recrue ${newCand.firstName} ${newCand.lastName} ajoutée.`);
+      showToast(`Recrue ${newCand.firstName} ${newCand.lastName} ajoutée (mode autonome).`);
     }
   };
 
@@ -143,17 +306,19 @@ export default function App() {
           prev.map((c) => (c.id === candidateId ? { ...c, welcomeKit: updated } : c))
         );
         showToast('Dotations Welcome Kit J1 mises à jour et émargées.');
-        refreshData();
+        return;
       }
+      throw new Error('API offline');
     } catch (e) {
       setCandidates((prev) =>
-        prev.map((c) =>
-          c.id === candidateId
-            ? { ...c, welcomeKit: { ...(c.welcomeKit as any), ...kitData } }
-            : c
-        )
+        prev.map((c) => {
+          if (c.id !== candidateId) return c;
+          const currentKit = c.welcomeKit || ({} as any);
+          const updatedKit = { ...currentKit, ...kitData, signedAt: new Date().toISOString().replace('T', ' ').slice(0, 16) };
+          return { ...c, welcomeKit: updatedKit };
+        })
       );
-      showToast('Welcome Kit mis à jour localement.');
+      showToast('Welcome Kit mis à jour et validé.');
     }
   };
 
@@ -173,8 +338,9 @@ export default function App() {
           prev.map((c) => (c.id === candidateId ? { ...c, transport: updated } : c))
         );
         showToast('Ligne et statut logistique J-1 mis à jour.');
-        refreshData();
+        return;
       }
+      throw new Error('API offline');
     } catch (e) {
       setCandidates((prev) =>
         prev.map((c) =>
@@ -200,8 +366,32 @@ export default function App() {
       if (res.ok) {
         showToast('Incident de transport enregistré.');
         refreshData();
+        return;
       }
+      throw new Error('API offline');
     } catch (e) {
+      const newInc: TransportIncident = {
+        id: Date.now(),
+        transportAssignmentId: candidateId,
+        date: incidentData.date || new Date().toISOString().slice(0, 10),
+        type: (incidentData.type as 'retard' | 'absence') || 'retard',
+        notes: incidentData.notes || 'Incident signalé',
+      };
+      setCandidates((prev) =>
+        prev.map((c) => {
+          if (c.id !== candidateId) return c;
+          const tr = c.transport || {
+            id: Date.now(),
+            candidateId,
+            confirmed: true,
+            incidents: [],
+          };
+          return {
+            ...c,
+            transport: { ...tr, incidents: [...(tr.incidents || []), newInc] } as any,
+          };
+        })
+      );
       showToast('Incident de transport ajouté.');
     }
   };
@@ -216,9 +406,26 @@ export default function App() {
       if (res.ok) {
         showToast('Pointage de présence enregistré.');
         refreshData();
+        return;
       }
+      throw new Error('API offline');
     } catch (e) {
-      showToast('Pointage effectué.');
+      const newAtt: Attendance = {
+        id: Date.now(),
+        candidateId,
+        date: data.date || new Date().toISOString().slice(0, 10),
+        status: data.status || 'PRESENT',
+        phase: data.phase || 'school',
+        notes: data.notes || '',
+      };
+      setCandidates((prev) =>
+        prev.map((c) =>
+          c.id === candidateId
+            ? { ...c, attendances: [...(c.attendances || []), newAtt] }
+            : c
+        )
+      );
+      showToast('Pointage de présence enregistré.');
     }
   };
 
@@ -232,8 +439,28 @@ export default function App() {
       if (res.ok) {
         showToast('Évaluation de formation validée.');
         refreshData();
+        return;
       }
+      throw new Error('API offline');
     } catch (e) {
+      const newEval: Evaluation = {
+        id: Date.now(),
+        candidateId,
+        type: data.type || 'theory',
+        quizScore: data.quizScore || 85,
+        examScore: data.examScore || 85,
+        practicalScore: data.practicalScore || 85,
+        trainerValidation: data.trainerValidation !== undefined ? data.trainerValidation : true,
+        date: data.date || new Date().toISOString().slice(0, 10),
+        notes: data.notes || 'Validation geste & sécurité réussie',
+      };
+      setCandidates((prev) =>
+        prev.map((c) =>
+          c.id === candidateId
+            ? { ...c, evaluations: [...(c.evaluations || []), newEval] }
+            : c
+        )
+      );
       showToast('Évaluation enregistrée.');
     }
   };
@@ -258,10 +485,22 @@ export default function App() {
           )
         );
         showToast('Affectation production & hiérarchie enregistrées.');
-        refreshData();
+        return;
       }
+      throw new Error('API offline');
     } catch (e) {
-      showToast('Affectation enregistrée localement.');
+      setCandidates((prev) =>
+        prev.map((c) =>
+          c.id === candidateId
+            ? {
+                ...c,
+                status: 'IN_PRODUCTION',
+                productionAssignment: { ...(c.productionAssignment as any), ...data },
+              }
+            : c
+        )
+      );
+      showToast('Affectation production enregistrée.');
     }
   };
 
@@ -278,9 +517,34 @@ export default function App() {
       if (res.ok) {
         showToast('Jalon Learning Curve et Carré Magique recalculés.');
         refreshData();
+        return;
       }
+      throw new Error('API offline');
     } catch (e) {
-      showToast('Jalon enregistré.');
+      const newPoint: LearningCurvePoint = {
+        id: Date.now(),
+        candidateId,
+        date: point.date || new Date().toISOString().slice(0, 10),
+        dayNumber: point.dayNumber || 10,
+        productivity: point.productivity || 60,
+        targetProductivity: point.targetProductivity || 60,
+        quality: point.quality || 98,
+        presence: point.presence !== undefined ? point.presence : true,
+        discipline: point.discipline || 95,
+        polyvalence: point.polyvalence || 1,
+        qualification: point.qualification,
+      };
+      setCandidates((prev) =>
+        prev.map((c) => {
+          if (c.id !== candidateId) return c;
+          const currentPoints = c.learningCurvePoints || [];
+          return {
+            ...c,
+            learningCurvePoints: [...currentPoints, newPoint],
+          };
+        })
+      );
+      showToast('Jalon Learning Curve enregistré.');
     }
   };
 
@@ -295,11 +559,24 @@ export default function App() {
         const created = await res.json();
         setPolyvalenceMatrix((prev) => [...prev, created]);
         showToast('Qualification poste ajoutée à la matrice.');
+        return;
       }
+      throw new Error('API offline');
     } catch (e) {
-      const localSkill = { id: Date.now(), ...skill } as PolyvalenceSkill;
+      const cand = candidates.find((c) => c.id === skill.candidateId);
+      const localSkill: PolyvalenceSkill = {
+        id: Date.now(),
+        candidateId: skill.candidateId || 1,
+        candidateName: skill.candidateName || (cand ? `${cand.firstName} ${cand.lastName}` : 'Opérateur'),
+        positionName: skill.positionName || 'Poste Assemblage',
+        segment: skill.segment || 'Segment Cockpit',
+        line: skill.line || 'Ligne Cockpit CK-01',
+        masteryLevel: skill.masteryLevel || 2,
+        isCriticalPost: skill.isCriticalPost || false,
+        qualifiedAt: skill.qualifiedAt || new Date().toISOString().slice(0, 10),
+      };
       setPolyvalenceMatrix((prev) => [...prev, localSkill]);
-      showToast('Habilitation enregistrée.');
+      showToast('Habilitation enregistrée dans la matrice.');
     }
   };
 
@@ -314,8 +591,9 @@ export default function App() {
         const updated = await res.json();
         setAlerts((prev) => prev.map((a) => (a.id === alertId ? updated : a)));
         showToast('Alerte clôturée avec succès.');
-        refreshData();
+        return;
       }
+      throw new Error('API offline');
     } catch (e) {
       setAlerts((prev) =>
         prev.map((a) =>
@@ -338,9 +616,27 @@ export default function App() {
       if (res.ok) {
         showToast(`Enquête ${survey.milestone} enregistrée. Alertes & Attrition recalculés.`);
         refreshData();
+        return;
       }
+      throw new Error('API offline');
     } catch (e) {
-      showToast('Enquête enregistrée.');
+      const newSurvey: Survey = {
+        id: Date.now(),
+        candidateId,
+        milestone: (survey.milestone as SurveyMilestone) || 'J5_ECOLE',
+        answers: survey.answers || {},
+        satisfaction: survey.satisfaction || 80,
+        notes: survey.notes || 'Enquête enregistrée',
+        createdAt: new Date().toISOString().replace('T', ' ').slice(0, 16),
+      };
+      setCandidates((prev) =>
+        prev.map((c) =>
+          c.id === candidateId
+            ? { ...c, surveys: [...(c.surveys || []), newSurvey] }
+            : c
+        )
+      );
+      showToast(`Enquête ${survey.milestone || 'J5'} enregistrée.`);
     }
   };
 
@@ -348,13 +644,59 @@ export default function App() {
     setIsCronRunning(true);
     try {
       const res = await fetch('/api/attrition/recalculate-all', { method: 'POST' });
-      const data = await res.json();
-      showToast(
-        `Batch Cron terminé : ${data.totalEvaluated} recrues évaluées, ${data.criticalCount} critiques.`
-      );
-      await refreshData();
+      if (res.ok) {
+        const data = await res.json();
+        showToast(
+          `Batch Cron terminé : ${data.totalEvaluated} recrues évaluées, ${data.criticalCount} critiques.`
+        );
+        await refreshData();
+        return;
+      }
+      throw new Error('API offline');
     } catch (e) {
-      showToast('Batch Cron exécuté.');
+      // Local calculation on client-side (GitHub Pages mode)
+      const updatedCandidates = candidates.map((cand) => {
+        const score = calculateAttritionScore(cand);
+        return {
+          ...cand,
+          attritionScores: [score, ...(cand.attritionScores || [])],
+        };
+      });
+
+      const newAlerts: Alert[] = [];
+      updatedCandidates.forEach((c) => {
+        const detected = detectCandidateAlerts(c);
+        detected.forEach((d) => {
+          const exists = alerts.some(
+            (a) => a.candidateId === c.id && a.type === d.type && !a.resolved
+          );
+          if (!exists) {
+            newAlerts.push({
+              id: Date.now() + Math.floor(Math.random() * 1000),
+              candidateId: c.id,
+              candidateName: `${c.firstName} ${c.lastName}`,
+              type: d.type as any,
+              condition: d.condition,
+              severity: d.severity as any,
+              recipientRole: d.recipientRole as any,
+              resolved: false,
+              createdAt: new Date().toISOString().replace('T', ' ').slice(0, 16),
+            });
+          }
+        });
+      });
+
+      setCandidates(updatedCandidates);
+      if (newAlerts.length > 0) {
+        setAlerts((prev) => [...newAlerts, ...prev]);
+      }
+      const critCount = updatedCandidates.filter(
+        (c) => c.attritionScores?.[0]?.level === 'Critique'
+      ).length;
+
+      showToast(
+        `Batch Cron IA terminé : ${updatedCandidates.length} recrues évaluées, ${critCount} en risque critique.`
+      );
     } finally {
       setIsCronRunning(false);
     }
@@ -384,6 +726,7 @@ export default function App() {
         onOpenAiCopilot={() => setIsAiCopilotOpen(true)}
         onTriggerCron={handleTriggerBatchCron}
         isCronRunning={isCronRunning}
+        onOpenDeploymentGuide={() => setIsDeploymentModalOpen(true)}
       />
 
       {/* Main Container with Navigation & Dynamic View */}
@@ -404,7 +747,7 @@ export default function App() {
               stats={stats}
               alerts={alerts}
               currentRole={currentRole}
-              onNavigateToCandidate={(id) => {
+              onNavigateToCandidate={() => {
                 setActiveTab('candidates');
               }}
               onNavigateToTab={(tab) => {
@@ -417,7 +760,7 @@ export default function App() {
             <CandidatesView
               candidates={candidates}
               trainingSessions={trainingSessions}
-              onSelectCandidate={(id) => {
+              onSelectCandidate={() => {
                 setActiveTab('welcome_kit');
               }}
               onAddCandidate={handleAddCandidate}
@@ -509,6 +852,13 @@ export default function App() {
         candidates={candidates}
         alerts={alerts}
         currentRole={currentRole}
+      />
+
+      {/* GitHub Actions & Pages Deployment Modal */}
+      <DeploymentGuideModal
+        isOpen={isDeploymentModalOpen}
+        onClose={() => setIsDeploymentModalOpen(false)}
+        onResetData={handleResetLocalData}
       />
     </div>
   );

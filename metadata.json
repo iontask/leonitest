@@ -1,0 +1,6 @@
+{
+  "name": "Plateforme IA Onboarding Manufacturing",
+  "description": "Plateforme digitale intelligente de suivi d'intégration 90 jours en milieu industriel manufacturing : Welcome Kit, transport, école, Learning Curve, Carré Magique, matrice de polyvalence, scoring IA d'attrition et alertes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
